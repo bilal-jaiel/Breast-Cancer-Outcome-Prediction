@@ -19,7 +19,7 @@ and 5,000-gene mRNA expression profiles, with a strict train/test protocol.
 | Context | Two-person project, M.R.R. course, Université Paris-Saclay (November-December 2025) |
 | Data | 1,231 patients (TCGA breast cancer cohort), 24 clinical variables, 5,000 genes |
 | Methods | Logistic regression, Lasso, stepwise AIC, Fisher and limma gene screening, Random Forest |
-| Best model | Imputed clinical GLM: AUC 0.83, sensitivity 82 % on the held-out test set |
+| Best model | Imputed clinical GLM: AUC 0.83, sensitivity 82 % on the held-out test set (see the caveat on follow-up time below) |
 
 ---
 
@@ -68,7 +68,7 @@ Test-set results obtained by running the two notebooks as they are in this repos
 | GLM, clinical, no imputation | 0.720 | 84.7 % | 33.3 % | 93.0 % |
 | GLM, clinical, imputed | 0.831 | 73.8 % | 81.6 % | 72.4 % |
 | GLM, all genes | 0.559 | 55.3 % | 57.9 % | 54.8 % |
-| Lasso, genes only (41 genes kept) | 0.637 | 73.0 % | 31.6 % | 80.9 % |
+| Lasso, genes only | 0.637 | 73.0 % | 31.6 % | 80.9 % |
 | Lasso, clinical + genes | 0.769 | 78.1 % | 68.4 % | 79.9 % |
 | Stepwise AIC, clinical + top-50 genes (t-test) | 0.756 | 70.0 % | 68.4 % | 70.4 % |
 | Fisher screening (top 10 genes) + clinical | 0.767 | 81.0 % | 67.4 % | 84.3 % |
@@ -81,7 +81,7 @@ Test-set results obtained by running the two notebooks as they are in this repos
 
 ### Takeaways
 
-1. Imputation is what makes the clinical baseline work. On the same variables, imputing missing values instead of dropping patients raises AUC from 0.72 to 0.83 and sensitivity from 33 % to 82 %.
+1. The imputed clinical model is the strongest one: AUC 0.83 and sensitivity 82 %, against 0.72 and 33 % when patients with missing values are dropped. The two models do not use exactly the same variables, though: the imputed one also keeps `days_to_last_follow_up` and `days_to_birth` (median-imputed), which the other drops. Follow-up time is recorded after diagnosis and is linked to the outcome, so part of this gain may come from leakage (see the limitations).
 2. Genes alone carry little signal (AUC 0.56 unpenalised, 0.64 with Lasso). Without strong dimension reduction, the model mostly fits noise.
 3. Genes add precision, not sensitivity. The best genomic model (Fisher top 10 + clinical) has the best balance of accuracy and specificity among models above 65 % sensitivity, but no genomic model beats the imputed clinical baseline on AUC.
 4. Random Forest does not solve the imbalance. It reaches 97 % specificity but detects only 30 % of deceased patients, because minimising overall error favours the majority class.
@@ -139,6 +139,7 @@ Use RStudio's *Run All*, or `knitr::purl()` followed by `Rscript`.
 
 ## Limitations and next steps
 
+- Follow-up time as a predictor: the imputed clinical data keeps `days_to_last_follow_up`. Like `follow_ups_disease_response`, it is not known at diagnosis, and its missing values may follow the vital status, so the 0.83 AUC is probably optimistic. Removing it (and re-running both notebooks) is the first fix to make.
 - Single train/test split: with fewer than 50 deceased patients per test set, sensitivity estimates have wide confidence intervals. Repeated cross-validation would give more reliable comparisons.
 - Splits differ between models (seeds 123 and 42 depending on the section), so small differences should not be over-interpreted.
 - Vital status ignores follow-up time; a survival model (Cox, Kaplan-Meier) would use the data more fully.

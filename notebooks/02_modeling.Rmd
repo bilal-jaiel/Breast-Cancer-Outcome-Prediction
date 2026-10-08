@@ -80,21 +80,6 @@ cleaned_clinical_data_df_data_test  <- cleaned_clinical_data_df[-train_idx, ]
 
 ```
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ##### Models
 
 # Clinical data brut
@@ -131,20 +116,8 @@ print(cm_result)
 cat("Accuracy :", round(cm_result$overall["Accuracy"], 4), "\n")
 cat("Sensibilité :", round(cm_result$byClass["Sensitivity"], 4), "\n")
 
-
 print_metrics(name,cm_result)
 ```
-
-          Reference
-Prediction   0   1
-         0 118   8
-         1  68  22
-
-> cat("AUC :", round(auc(roc_obj),4), "\n")
-AUC : 0.7204
-> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
-F1-score (classe 1) : 0.3667
-
 
 # Clinical data (NA remplis)
 ```{r}
@@ -178,19 +151,8 @@ cat("\n--- RÉSULTATS GLM IMPUTÉ (Seuil TRAIN appliqué) ---\n")
 cat("AUC :", round(auc(roc_obj_test), 4), "\n")
 print(cm_result)
 
-
 print_metrics(name,cm_result)
 ```
-
-          Reference
-Prediction   0   1
-         0 191  22
-         1  13  18
-
-> cat("AUC :", round(auc(roc_obj),4), "\n")
-AUC : 0.7181
-> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
-F1-score (classe 1) : 0.507
 
 # GeneX
 ```{r}
@@ -272,14 +234,6 @@ print(cm_result_imp)
 # Appel de ta fonction personnalisée (assure-toi qu'elle est chargée)
 print_metrics(name, cm_result_imp)
 ```
---- RÉSULTATS GLM GENEX IMPUTÉ ---
-> cat("AUC :", round(auc(roc_obj_imp), 4), "\n")
-AUC : 0.546
-> print(cm_result_imp$table)
-          Reference
-Prediction   0   1
-         0  99  23
-         1 106  17
 
 # Lasso genex (glmnet)
 ```{r}
@@ -299,7 +253,6 @@ df_GeneX$vital_status <- as.factor(cleaned_clinical_data_df$vital_status)
 train_idx <- createDataPartition(df_GeneX$vital_status, p = 0.8, list = FALSE)
 data_train <- df_GeneX[train_idx, ]
 data_test  <- df_GeneX[-train_idx, ]
-
 
 # GLMnet exige une matrice numérique pour les prédicteurs (X)
 X_train <- model.matrix(vital_status ~ ., data = data_train)[, -1]
@@ -341,16 +294,6 @@ cat("AUC Lasso (TEST) :", round(auc(roc_obj_test), 4), "\n")
 
 print_metrics(name,cm_result_lasso)
 ```
-          Reference
-Prediction   0   1
-         0 135  15
-         1  70  25
-
-> cat("AUC :", round(auc(roc_obj),4), "\n")
-AUC : 0.7204
-> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
-F1-score (classe 1) : 0.3704
-
 
 # Lasso sur le modèle combiné complété. ################################# a revoir
 ```{r}
@@ -392,7 +335,6 @@ X_test <- matrix(0, nrow = nrow(X_test_temp), ncol = length(vars_train), dimname
 cols_communes <- intersect(colnames(X_test_temp), vars_train)
 X_test[, cols_communes] <- X_test_temp[, cols_communes]
 
-
 # --- 5. LASSO AVEC CROSS-VALIDATION ---
 
 cat("Lancement du Lasso...\n")
@@ -402,7 +344,6 @@ cv_lasso <- cv.glmnet(X_train, Y_train, family = "binomial", alpha = 1, nfolds =
 # Récupération du meilleur lambda
 best_lambda <- cv_lasso$lambda.1se # ou lambda.min
 cat("Meilleur Lambda :", best_lambda, "\n")
-
 
 # --- 6. PRÉDICTION ET ÉVALUATION ---
 
@@ -429,28 +370,13 @@ conf_mat <- confusionMatrix(factor(pred_class, levels = c(0,1)),
                             factor(Y_test, levels = c(0,1)), 
                             positive = "1")
 
-
 cat("\n--- RÉSULTATS GLMNET LASSO COMBINÉ (Seuil TRAIN appliqué) ---\n")
 cat("Seuil Optimal utilisé (TRAIN) :", round(seuil, 4), "\n")
 cat("AUC Lasso Combine (TEST) :", round(auc_val_test, 4), "\n")
 print(conf_mat)
 
-
 print_metrics(name,conf_mat)
 ```
-
---- RÉSULTATS GLMNET LASSO (Genex + Clinical, Imputé) ---
-> print(cm_result_lasso_mi$table)
-          Reference
-Prediction   0   1
-         0 154  14
-         1  51  26
-         1  47  28
-> cat("AUC :", round(auc(roc_obj),4), "\n")
-AUC : 0.7204
-> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
-F1-score (classe 1) : 0.3704
-
 
 # méthode both, petit soucis ça cv pas
 ```{r}
@@ -523,10 +449,8 @@ roc_obj_test <- roc(test$vital_status, probs, quiet=TRUE)
 cat("\n--- RÉSULTATS STEPWISE (Top 50) (Seuil TRAIN appliqué) ---\nAUC TEST:", round(auc(roc_obj_test), 4), "\n")
 cat("Seuil optimal utilisé (TRAIN) :", round(seuil_optimal, 4), "\n")
 
-
 print_metrics(name,cm)
 ```
-
 
 # screening avec fischer
 ```{r}
@@ -707,16 +631,6 @@ print(cm)
 print_metrics(name, cm)
 ```
 
-          Reference
-Prediction   0   1
-         0 167  24
-         1  37  14
-
-> cat("AUC :", round(auc(roc_obj),4), "\n")
-AUC : 0.5935
-> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
-F1-score (classe 1) : 0.3146
-
 # nouvelle methode de screening avec lima
 ```{r}
 name <- "Screening Limma Optimisé (Auto-Tuned)"
@@ -875,17 +789,6 @@ cat("==============================================\n")
 print(cm)
 print_metrics(name, cm)
 ```
-          Reference
-Prediction   0   1
-         0 160  21
-         1  44  17
-
-> cat("AUC :", round(auc(roc_obj),4), "\n")
-AUC : 0.6293
-> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
-F1-score (classe 1) : 0.3434
-
-
 
 ```{r}
 name <- "glm (lasso GeneX) et cleaned_clinical_data"
@@ -937,8 +840,6 @@ X_genes_test_screened  <- X_genes_test[, selected_genes_names, drop = FALSE]
 data_train_final <- cbind(vital_status = y_train, df_clin_train, X_genes_train_screened)
 data_test_final  <- cbind(vital_status = y_test, df_clin_test, X_genes_test_screened)
 
-
-
 # --- Identifier les colonnes catégorielles ---
 cat_cols <- names(Filter(is.factor, data_train_final))
 
@@ -965,13 +866,8 @@ cm <- confusionMatrix(factor(pred_class, levels=c(0,1)),
                       factor(data_test_final$vital_status, levels=c(0,1)), 
                       positive="1")
 
-
 print_metrics(name,cm)
 ```
-          Reference
-Prediction   0   1
-         0 126   7
-         1  78  31
 
 ```{r}
 name <- "Random Forest (Clin + 41 Genes)"
@@ -1065,7 +961,6 @@ cat("\n--- RÉSULTATS RANDOM FOREST ---\n")
 cat("AUC :", round(auc_val_rf, 4), "\n")
 print_metrics(name,cm_rf)
 ```
-
 
 ```{r}
 library(ggplot2)
