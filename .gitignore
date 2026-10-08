@@ -1,0 +1,29 @@
+# Data (not redistributed) and generated objects
+data/raw/
+data/processed/
+*.RData
+*.Rdata
+
+# R / RStudio
+.Rhistory
+.RDataTmp
+.Rproj.user/
+*.Rproj
+
+# Knitted outputs
+notebooks/*.html
+notebooks/*.pdf
+notebooks/*_files/
+
+# LaTeX build files
+*.aux
+*.log
+*.out
+*.toc
+*.nav
+*.snm
+*.synctex.gz
+
+# OS
+.DS_Store
+Thumbs.db

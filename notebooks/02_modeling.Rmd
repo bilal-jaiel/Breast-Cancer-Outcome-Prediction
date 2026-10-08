@@ -1,0 +1,1137 @@
+---
+title: "Breast cancer outcome: modeling"
+author: "Bilâl Jaiel, Kalaivaasan Balakumar"
+date: "2025-11-10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2); library(ggrepel)
+  library(caret); library(pROC); library(glmnet); library(randomForest); library(limma)
+})
+dir.create("../results", showWarnings = FALSE)
+```
+
+# Chargement des données
+```{r}
+# Lire ensuite
+load("../data/processed/cleaned_clinical_data_df.RData")
+load("../data/processed/df_clinical_data_brut.RData")
+load("../data/processed/GeneX.RData")
+load("../data/processed/GeneX_pca.RData")
+
+```
+
+# installation des packages
+
+```{r}
+if(!require(caret)){
+    install.packages("caret")
+    library(caret)
+}
+if(!require(ggrepel)){
+    install.packages("ggrepel")
+    library(ggrepel)
+}
+```
+
+# fonction pour afficher les resultat
+
+```{r}
+
+modol_results <- data.frame(
+  Model = character(),
+  Accuracy = numeric(),
+  Sensitivity = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Fonction pour afficher les métriques principales d'un confusionMatrix
+print_metrics <- function(name, cm_result) {
+  # Extraire les métriques
+  sensibility <- cm_result$byClass["Sensitivity"]
+  accuracy    <- cm_result$overall["Accuracy"]
+
+  modol_results <<- rbind(modol_results, data.frame(Model=name, Sensitivity=sensibility, Accuracy=accuracy))
+  
+  print(cm_result)
+
+  # Affichage arrondi
+  cat("Accuracy    :", round(accuracy, 4), "\n")
+  cat("Sensitivity :", round(sensibility, 4), "\n")
+}
+```
+
+# On fait le split pour cleaned_clinical_data_df
+```{r}
+library(caret)
+library(pROC)
+set.seed(123)
+
+# --- 1. Conversion de la cible en facteur ---
+cleaned_clinical_data_df$vital_status <- as.factor(cleaned_clinical_data_df$vital_status)
+
+# --- 2. Split train/test ---
+train_idx <- createDataPartition(cleaned_clinical_data_df$vital_status, p = 0.8, list = FALSE)
+cleaned_clinical_data_df_data_train <- cleaned_clinical_data_df[train_idx, ]
+cleaned_clinical_data_df_data_test  <- cleaned_clinical_data_df[-train_idx, ]
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##### Models
+
+# Clinical data brut
+```{r}
+name <- "glm clinical_data_brut"
+set.seed(123)
+df_clinical_data_brut$vital_status <- as.numeric(as.character(df_clinical_data_brut$vital_status)) # Conversion cible
+df_clinical_data_brut_clean <- df_clinical_data_brut[complete.cases(df_clinical_data_brut), ] # Nettoyage avant split
+train_idx <- createDataPartition(df_clinical_data_brut_clean$vital_status, p = 0.8, list = FALSE)
+data_train_clinical_data <- df_clinical_data_brut_clean[train_idx, ]
+data_test_clinical_data <- df_clinical_data_brut_clean[-train_idx, ]
+cols_constantes <- sapply(data_train_clinical_data, function(x) length(unique(na.omit(x)))) < 2
+if(any(cols_constantes)) {
+    cols_a_retirer <- names(data_train_clinical_data)[cols_constantes]
+    data_train_clinical_data <- data_train_clinical_data[, !cols_constantes]
+    data_test_clinical_data <- data_test_clinical_data[, !(colnames(data_test_clinical_data) %in% cols_a_retirer)]
+}
+library(pROC)
+glm_clinical <- glm(vital_status ~ ., data = data_train_clinical_data, family = "binomial")
+pred_prob_train_seuil <- predict(glm_clinical, newdata = data_train_clinical_data, type = "response") # Prédire sur TRAIN
+pred_prob <- predict(glm_clinical, newdata = data_test_clinical_data, type = "response") # Prédire sur TEST
+roc_obj <- roc(data_train_clinical_data$vital_status, pred_prob_train_seuil, quiet = TRUE) # Utiliser la prédiction TRAIN
+seuil_optimal <- coords(roc_obj, "best", best.method = "youden", transpose = TRUE)["threshold"]
+pred_class <- ifelse(pred_prob > seuil_optimal, 1, 0) # Appliquer le seuil TRAIN à la prédiction TEST
+cm_result <- confusionMatrix(factor(pred_class, levels = c(0,1)),
+                             factor(data_test_clinical_data$vital_status, levels = c(0,1)),
+                             positive = "1")
+# Pour l'affichage de l'AUC TEST rigoureux
+roc_obj_test <- roc(data_test_clinical_data$vital_status, pred_prob, quiet = TRUE)
+
+cat("\n--- Matrice de Confusion (Seuil ROC TRAIN appliqué) ---\n")
+cat("AUC TEST :", round(auc(roc_obj_test), 4), "\n")
+print(cm_result)
+cat("Accuracy :", round(cm_result$overall["Accuracy"], 4), "\n")
+cat("Sensibilité :", round(cm_result$byClass["Sensitivity"], 4), "\n")
+
+
+print_metrics(name,cm_result)
+```
+
+          Reference
+Prediction   0   1
+         0 118   8
+         1  68  22
+
+> cat("AUC :", round(auc(roc_obj),4), "\n")
+AUC : 0.7204
+> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
+F1-score (classe 1) : 0.3667
+
+
+# Clinical data (NA remplis)
+```{r}
+name <- "glm cleaned_clinical_data"
+
+# --- 5. Conversion de la cible en numérique pour glm binomial ---
+cleaned_clinical_data_df_data_train$vital_status <- as.numeric(as.character(cleaned_clinical_data_df_data_train$vital_status))
+cleaned_clinical_data_df_data_test$vital_status  <- as.numeric(as.character(cleaned_clinical_data_df_data_test$vital_status))
+
+# --- 6. Modèle GLM ---
+glm_model <- glm(vital_status ~ ., data = cleaned_clinical_data_df_data_train, family = "binomial")
+
+# --- 7. Prédiction ---
+pred_prob_train_seuil <- predict(glm_model, newdata = cleaned_clinical_data_df_data_train, type = "response")
+pred_prob <- predict(glm_model, newdata = cleaned_clinical_data_df_data_test, type = "response")
+
+# --- 8. ROC et seuil optimal ---
+roc_obj <- roc(cleaned_clinical_data_df_data_train$vital_status, pred_prob_train_seuil, quiet = TRUE)
+seuil_optimal <- coords(roc_obj, "best", best.method = "youden")$threshold
+
+# --- 9. Classification et matrice de confusion ---
+pred_class <- ifelse(pred_prob > seuil_optimal, 1, 0)
+cm_result <- confusionMatrix(factor(pred_class, levels = c(0,1)),
+                             factor(cleaned_clinical_data_df_data_test$vital_status, levels = c(0,1)),
+                             positive = "1")
+
+# Réévaluer l'AUC sur le TEST pour l'affichage final
+roc_obj_test <- roc(cleaned_clinical_data_df_data_test$vital_status, pred_prob, quiet = TRUE) 
+
+cat("\n--- RÉSULTATS GLM IMPUTÉ (Seuil TRAIN appliqué) ---\n")
+cat("AUC :", round(auc(roc_obj_test), 4), "\n")
+print(cm_result)
+
+
+print_metrics(name,cm_result)
+```
+
+          Reference
+Prediction   0   1
+         0 191  22
+         1  13  18
+
+> cat("AUC :", round(auc(roc_obj),4), "\n")
+AUC : 0.7181
+> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
+F1-score (classe 1) : 0.507
+
+# GeneX
+```{r}
+name <- "glm GeneX"
+
+library(caret)
+library(pROC)
+set.seed(42)
+
+df_GeneX <- as.data.frame(GeneX)
+df_GeneX$vital_status <- as.factor(cleaned_clinical_data_df$vital_status)
+
+# Partitionnement
+train_idx <- createDataPartition(df_GeneX$vital_status, p = 0.8, list = FALSE)
+data_train <- df_GeneX[train_idx, ]
+data_test  <- df_GeneX[-train_idx, ]
+
+# Conversion en numérique pour glm et pROC (0 et 1)
+data_train$vital_status <- as.numeric(as.character(data_train$vital_status))
+data_test$vital_status <- as.numeric(as.character(data_test$vital_status))
+
+# Nettoyage des colonnes constantes
+cols_constantes <- sapply(data_train, function(x) length(unique(na.omit(x)))) < 2
+if(any(cols_constantes)) {
+    cols_a_retirer <- names(data_train)[cols_constantes]
+    data_train <- data_train[, !cols_constantes]
+    data_test  <- data_test[, !(colnames(data_test) %in% cols_a_retirer)]
+}
+
+# Gestion des facteurs
+factor_cols <- sapply(data_train, is.factor)
+factor_names <- names(data_train)[factor_cols]
+for(col_name in factor_names) {
+    if (col_name %in% names(data_test)) {
+        levels(data_test[[col_name]]) <- levels(data_train[[col_name]])
+    }
+}
+
+# 1. Entraînement du modèle
+glm_model_imp <- glm(vital_status ~ ., data = data_train, family = "binomial")
+
+# -------------------------------------------------------------------------
+# ETAPE CRITIQUE : CALCUL DU SEUIL SUR LE TRAIN
+# -------------------------------------------------------------------------
+
+# A. Prédiction des probabilités sur le TRAIN
+pred_prob_train <- predict(glm_model_imp, newdata = data_train, type = "response") 
+
+# B. Création de l'objet ROC sur le TRAIN
+roc_obj_train <- roc(data_train$vital_status, pred_prob_train, quiet = TRUE)
+
+# C. Calcul du seuil optimal (Youden) basé sur le TRAIN
+seuil_optimal_train <- coords(roc_obj_train, "best", best.method = "youden", transpose = FALSE)[1, "threshold"]
+# Note: [1, "threshold"] est une sécurité au cas où plusieurs seuils sont "best"
+
+# -------------------------------------------------------------------------
+# APPLICATION SUR LE TEST
+# -------------------------------------------------------------------------
+
+# Prédiction des probabilités sur le TEST
+pred_prob_test <- predict(glm_model_imp, newdata = data_test, type = "response")
+
+# Application du SEUIL TRAIN sur les probabilités TEST
+pred_class_test <- ifelse(pred_prob_test > seuil_optimal_train, 1, 0)
+
+# Matrice de confusion
+cm_result_imp <- confusionMatrix(factor(pred_class_test, levels = c(0,1)),
+                                 factor(data_test$vital_status, levels = c(0,1)),
+                                 positive = "1")
+
+# Pour l'affichage de l'AUC TEST (juste à titre informatif)
+roc_obj_test <- roc(data_test$vital_status, pred_prob_test, quiet = TRUE)
+
+cat("\n--- RÉSULTATS GLM GENEX IMPUTÉ (Seuil calibré sur TRAIN) ---\n")
+cat("AUC TEST :", round(auc(roc_obj_test), 4), "\n")
+cat("Seuil optimal utilisé (issu du TRAIN) :", round(seuil_optimal_train, 4), "\n")
+print(cm_result_imp)
+
+# Appel de ta fonction personnalisée (assure-toi qu'elle est chargée)
+print_metrics(name, cm_result_imp)
+```
+--- RÉSULTATS GLM GENEX IMPUTÉ ---
+> cat("AUC :", round(auc(roc_obj_imp), 4), "\n")
+AUC : 0.546
+> print(cm_result_imp$table)
+          Reference
+Prediction   0   1
+         0  99  23
+         1 106  17
+
+# Lasso genex (glmnet)
+```{r}
+name <- "lasso sur GeneX"
+
+library(glmnet)
+library(caret)
+library(pROC)
+
+# --- 1. SÉPARATION ET PRÉPARATION DES DONNÉES (Refait le Split) ---
+
+set.seed(42) 
+
+df_GeneX <- as.data.frame(GeneX)
+df_GeneX$vital_status <- as.factor(cleaned_clinical_data_df$vital_status)
+# Split stratifié
+train_idx <- createDataPartition(df_GeneX$vital_status, p = 0.8, list = FALSE)
+data_train <- df_GeneX[train_idx, ]
+data_test  <- df_GeneX[-train_idx, ]
+
+
+# GLMnet exige une matrice numérique pour les prédicteurs (X)
+X_train <- model.matrix(vital_status ~ ., data = data_train)[, -1]
+X_test  <- model.matrix(vital_status ~ ., data = data_test)[, -1]
+Y_train <- data_train$vital_status
+
+cv_lasso <- cv.glmnet(X_train, Y_train,
+                      alpha = 1, # Lasso
+                      family = "binomial",
+                      type.measure = "auc") # Cross-validation pour trouver lambda
+
+lambda_best <- cv_lasso$lambda.1se
+
+# --- CORRECTION 1 : Prédiction TRAIN pour le Seuil ---
+pred_prob_lasso_train_seuil <- predict(cv_lasso, newx = X_train, s = lambda_best, type = "response")[,1]
+
+pred_prob_lasso <- predict(cv_lasso, newx = X_test, s = lambda_best, type = "response")[,1]
+
+# --- CORRECTION 2 : Utiliser la prédiction TRAIN pour calculer le Seuil ---
+# On utilise la cible du TRAIN (data_train$vital_status) avec la prédiction TRAIN
+roc_obj_lasso_seuil <- roc(data_train$vital_status, pred_prob_lasso_train_seuil, quiet = TRUE)
+seuil_optimal_lasso <- coords(roc_obj_lasso_seuil, "best", best.method = "youden")$threshold
+
+# --- APPLIQUER le Seuil TRAIN à la prédiction TEST ---
+pred_class_lasso <- ifelse(pred_prob_lasso > seuil_optimal_lasso, 1, 0)
+
+cm_result_lasso <- confusionMatrix(factor(pred_class_lasso, levels = c(0,1)),
+                                   factor(data_test$vital_status, levels = c(0,1)),
+                                   positive = "1")
+
+# Pour l'affichage de l'AUC TEST rigoureux
+roc_obj_test <- roc(data_test$vital_status, pred_prob_lasso, quiet = TRUE)
+
+# --- RÉSULTATS ---
+cat("\n--- RÉSULTATS GLMNET LASSO (Genex) (Seuil TRAIN appliqué) ---\n")
+cat("Seuil Optimal utilisé (TRAIN) :", round(seuil_optimal_lasso, 4), "\n")
+cat("Lambda Optimal (1se) :", round(lambda_best, 5), "\n")
+cat("AUC Lasso (TEST) :", round(auc(roc_obj_test), 4), "\n")
+
+print_metrics(name,cm_result_lasso)
+```
+          Reference
+Prediction   0   1
+         0 135  15
+         1  70  25
+
+> cat("AUC :", round(auc(roc_obj),4), "\n")
+AUC : 0.7204
+> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
+F1-score (classe 1) : 0.3704
+
+
+# Lasso sur le modèle combiné complété. ################################# a revoir
+```{r}
+name <- "lasso cleaned_merged_data"
+
+library(glmnet)
+library(caret)
+library(pROC)
+
+set.seed(123)
+
+# 1. Fusion
+dataset_combine <- cbind(as.data.frame(GeneX), cleaned_clinical_data_df)
+
+# 2. Split (CORRECTION : on cible la colonne vital_status)
+train_idx <- createDataPartition(dataset_combine$vital_status, p = 0.8, list = FALSE)
+
+dataset_combine_train <- dataset_combine[train_idx,]
+dataset_combine_test <- dataset_combine[-train_idx,]
+
+# --- 4. PRÉPARATION DES MATRICES POUR GLMNET ---
+
+# A. Matrice d'entraînement (X_train) et Cible (Y_train)
+# model.matrix gère automatiquement les gènes (numériques) et convertit le clinique (facteurs) en dummy variables
+X_train <- model.matrix(vital_status ~ ., data = dataset_combine_train)[, -1] # [, -1] retire l'intercept
+Y_train <- dataset_combine_train$vital_status
+
+# B. Matrice de Test (X_test) avec SÉCURISATION DES COLONNES
+# On crée la matrice brute pour le test
+X_test_temp <- model.matrix(vital_status ~ ., data = dataset_combine_test)[, -1]
+Y_test <- dataset_combine_test$vital_status
+
+# C. Alignement : On s'assure que X_test a exactement les mêmes colonnes que X_train
+# (C'est indispensable car model.matrix peut ne pas créer certaines colonnes dans le test si une catégorie rare est absente)
+vars_train <- colnames(X_train)
+X_test <- matrix(0, nrow = nrow(X_test_temp), ncol = length(vars_train), dimnames = list(NULL, vars_train))
+
+# On remplit avec les données existantes
+cols_communes <- intersect(colnames(X_test_temp), vars_train)
+X_test[, cols_communes] <- X_test_temp[, cols_communes]
+
+
+# --- 5. LASSO AVEC CROSS-VALIDATION ---
+
+cat("Lancement du Lasso...\n")
+# alpha = 1 pour Lasso (0 pour Ridge)
+cv_lasso <- cv.glmnet(X_train, Y_train, family = "binomial", alpha = 1, nfolds = 5)
+
+# Récupération du meilleur lambda
+best_lambda <- cv_lasso$lambda.1se # ou lambda.min
+cat("Meilleur Lambda :", best_lambda, "\n")
+
+
+# --- 6. PRÉDICTION ET ÉVALUATION ---
+
+# --- CORRECTION : Introduire la prédiction TRAIN pour le Seuil ---
+prob_lasso_train_seuil <- predict(cv_lasso, newx = X_train, s = best_lambda, type = "response")[,1]
+
+# Prédiction des probabilités sur le test
+prob_lasso <- predict(cv_lasso, newx = X_test, s = best_lambda, type = "response")[,1]
+
+# --- CORRECTION : Utiliser la prédiction TRAIN pour le calcul du Seuil ---
+roc_lasso_seuil <- roc(Y_train, prob_lasso_train_seuil, quiet = TRUE)
+auc_val_train <- auc(roc_lasso_seuil) # Calcul de l'AUC TRAIN pour info
+
+# Calcul de l'AUC TEST (pour l'affichage final)
+roc_lasso_test <- roc(Y_test, prob_lasso, quiet = TRUE)
+auc_val_test <- auc(roc_lasso_test)
+
+# Matrice de confusion (Seuil Youden)
+coords_best <- coords(roc_lasso_seuil, "best", best.method = "youden")
+seuil <- coords_best$threshold
+pred_class <- ifelse(prob_lasso > seuil, 1, 0) # Appliquer le seuil TRAIN à la prédiction TEST
+
+conf_mat <- confusionMatrix(factor(pred_class, levels = c(0,1)), 
+                            factor(Y_test, levels = c(0,1)), 
+                            positive = "1")
+
+
+cat("\n--- RÉSULTATS GLMNET LASSO COMBINÉ (Seuil TRAIN appliqué) ---\n")
+cat("Seuil Optimal utilisé (TRAIN) :", round(seuil, 4), "\n")
+cat("AUC Lasso Combine (TEST) :", round(auc_val_test, 4), "\n")
+print(conf_mat)
+
+
+print_metrics(name,conf_mat)
+```
+
+--- RÉSULTATS GLMNET LASSO (Genex + Clinical, Imputé) ---
+> print(cm_result_lasso_mi$table)
+          Reference
+Prediction   0   1
+         0 154  14
+         1  51  26
+         1  47  28
+> cat("AUC :", round(auc(roc_obj),4), "\n")
+AUC : 0.7204
+> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
+F1-score (classe 1) : 0.3704
+
+
+# méthode both, petit soucis ça cv pas
+```{r}
+name <- "methode both sur cleaned_merge_data"
+
+library(MASS); library(caret); library(pROC)
+set.seed(123)
+
+# 1. Fonction correctrice
+fix_levels <- function(tr, te) {
+  move_idx <- c()
+  for(col in names(Filter(is.factor, tr))) {
+    diffs <- setdiff(unique(te[[col]]), unique(tr[[col]]))
+    if(length(diffs) > 0) move_idx <- c(move_idx, which(te[[col]] %in% diffs))
+  }
+  if(length(move_idx) > 0) {
+    tr <- rbind(tr, te[move_idx, ]); te <- te[-move_idx, ]
+    tr <- droplevels(tr); te <- droplevels(te)
+  }
+  return(list(train=tr, test=te))
+}
+
+# 2. Préparation
+colnames(GeneX) <- make.names(colnames(GeneX))
+clin <- cleaned_clinical_data_df
+clin$vital_status <- as.numeric(as.character(clin$vital_status))
+clin[sapply(clin, is.character)] <- lapply(clin[sapply(clin, is.character)], as.factor)
+df <- cbind(clin, as.data.frame(GeneX))
+
+# 3. Split & Correction
+idx <- createDataPartition(df$vital_status, p=0.8, list=FALSE)
+sets <- fix_levels(df[idx, ], df[-idx, ])
+train <- sets$train; test <- sets$test
+
+# 4. Screening Univarié (Top 200 gènes)
+cat("Screening des 200 meilleurs gènes...\n")
+gene_cols <- colnames(GeneX)
+pvals <- apply(train[, gene_cols], 2, function(x) {
+  if(var(x)==0) 1 else tryCatch(t.test(x ~ train$vital_status)$p.value, error=function(e) 1)
+})
+
+# --- MODIFICATION ICI : 200 au lieu de 50 ---
+top_genes <- names(sort(pvals)[1:50]) 
+vars <- c("vital_status", setdiff(names(clin), "vital_status"), top_genes)
+
+# 5. Modélisation Stepwise (Peut être long !)
+cat("Lancement du Stepwise sur", length(vars), "variables... Patientez.\n")
+m_null <- glm(vital_status ~ 1, data=train[, vars], family="binomial")
+m_full <- glm(vital_status ~ ., data=train[, vars], family="binomial")
+
+final_m <- step(m_null, scope=list(lower=m_null, upper=m_full), direction="both", trace=0)
+
+# 6. Évaluation
+# --- CORRECTION 1 : Prédiction TRAIN pour le Seuil ---
+probs_train_seuil <- predict(final_m, newdata=train[, vars], type="response")
+probs <- predict(final_m, newdata=test[, vars], type="response")
+
+# --- CORRECTION 2 : Utiliser la prédiction TRAIN pour le calcul du Seuil ---
+roc_obj_seuil <- roc(train$vital_status, probs_train_seuil, quiet=TRUE)
+seuil_optimal <- coords(roc_obj_seuil, "best", best.method = "youden")$threshold
+
+# --- APPLIQUER le Seuil TRAIN à la prédiction TEST ---
+pred_class <- ifelse(probs > seuil_optimal, 1, 0)
+cm <- confusionMatrix(factor(pred_class, levels=c(0,1)), 
+                      factor(test$vital_status, levels=c(0,1)), positive="1")
+
+# Pour l'affichage de l'AUC TEST rigoureux
+roc_obj_test <- roc(test$vital_status, probs, quiet=TRUE)
+
+cat("\n--- RÉSULTATS STEPWISE (Top 50) (Seuil TRAIN appliqué) ---\nAUC TEST:", round(auc(roc_obj_test), 4), "\n")
+cat("Seuil optimal utilisé (TRAIN) :", round(seuil_optimal, 4), "\n")
+
+
+print_metrics(name,cm)
+```
+
+
+# screening avec fischer
+```{r}
+library(caret)
+library(pROC)
+
+# ==============================================================================
+# 0. PRÉPARATION DES DONNÉES (SPLIT TRAIN/TEST)
+# ==============================================================================
+name <- "Screening Fisher Optimisé"
+
+# Chargement
+y <- as.numeric(as.character(cleaned_clinical_data_df$vital_status))
+X <- GeneX  
+set.seed(42)
+
+# Partition 80/20 (On fige le Train et le Test ici)
+idx <- createDataPartition(y, p = 0.8, list = FALSE)
+
+train_clin  <- cleaned_clinical_data_df[idx, ]
+test_clin   <- cleaned_clinical_data_df[-idx, ]
+train_genes <- X[idx, ]
+test_genes  <- X[-idx, ]
+
+# ==============================================================================
+# 1. RECHERCHE DU 'k' OPTIMAL (CROSS-VALIDATION SUR LE TRAIN)
+# ==============================================================================
+cat("\n--- ÉTAPE 1 : OPTIMISATION DU NOMBRE DE VARIABLES (K-FOLD) ---\n")
+
+# A. Calcul du ranking Fisher sur tout le TRAIN (pour gagner du temps)
+cat("Calcul des scores Fisher sur le Train set...\n")
+f_scores_train <- apply(train_genes, 2, function(g){
+  tryCatch({
+    as.numeric(summary(aov(g ~ train_clin$vital_status))[[1]]["train_clin$vital_status", "F value"])
+  }, error = function(e) 0)
+})
+genes_ranked_cv <- names(sort(f_scores_train, decreasing = TRUE))
+
+# B. Boucle de Validation Croisée
+k_candidates <- c(5, 10, 15, 20, 25, 30, 40, 50, 75, 100)
+mean_aucs <- c()
+folds <- createFolds(train_clin$vital_status, k = 5, list = TRUE)
+
+cat("Test des candidats k :", paste(k_candidates, collapse=", "), "\n")
+
+for (k in k_candidates) {
+  fold_aucs <- c()
+  
+  for (i in 1:5) { # 5-Fold
+    # Indices pour ce fold
+    idx_val <- folds[[i]]
+    idx_trn <- setdiff(seq_len(nrow(train_clin)), idx_val)
+    
+    # Selection top k
+    top_k_genes <- genes_ranked_cv[1:k]
+    
+    # Construction DF temporaires
+    df_trn <- cbind(vital = train_clin$vital_status[idx_trn], 
+                    train_clin[idx_trn, setdiff(names(train_clin), "vital_status")], 
+                    train_genes[idx_trn, top_k_genes])
+    
+    df_val <- cbind(vital = train_clin$vital_status[idx_val], 
+                    train_clin[idx_val, setdiff(names(train_clin), "vital_status")], 
+                    train_genes[idx_val, top_k_genes])
+    
+    # Modèle & Eval
+    model <- glm(vital ~ ., data = df_trn, family = "binomial")
+    prob  <- predict(model, newdata = df_val, type = "response")
+    roc_curr <- roc(df_val$vital, prob, quiet = TRUE)
+    fold_aucs <- c(fold_aucs, auc(roc_curr))
+  }
+  mean_aucs <- c(mean_aucs, mean(fold_aucs))
+}
+
+# C. Sélection du gagnant
+best_k_idx <- which.max(mean_aucs)
+best_k <- k_candidates[best_k_idx]
+cat("\n>>> RÉSULTAT OPTIMISATION : Le meilleur k est", best_k, "avec une AUC moyenne de", round(mean_aucs[best_k_idx], 4), "\n")
+
+# Petit plot pour visualiser
+plot(k_candidates, mean_aucs, type="b", pch=19, col="blue", main="Optimisation k (CV Train)", xlab="Nombre de variables", ylab="AUC Moyen")
+abline(v=best_k, col="red", lty=2)
+
+# ==============================================================================
+# 2. APPLICATION DU MODÈLE FINAL (TON CODE AVEC LE BEST K)
+# ==============================================================================
+cat("\n--- ÉTAPE 2 : ENTRAINEMENT FINAL ET TEST (CODE VALIDÉ) ---\n")
+
+############################################################
+# 1. FISHER SCREENING (ANOVA sur le TRAIN uniquement)
+############################################################
+
+# (On a déjà les scores calculés ci-dessus f_scores_train, on les réutilise)
+genes_ranked <- genes_ranked_cv 
+
+# --- CHOIX CRITIQUE DU NOMBRE DE VARIABLES ---
+k <- best_k  # <--- ON UTILISE LE K TROUVÉ PAR K-FOLD
+top_genes <- genes_ranked[1:k]
+
+cat("Top", k, "gènes sélectionnés pour le modèle final :\n")
+print(top_genes)
+
+# Création des datasets finaux
+train_final <- cbind(
+  vital_status = train_clin$vital_status,
+  train_clin[, setdiff(names(train_clin), "vital_status")],
+  as.data.frame(train_genes[, top_genes, drop = FALSE])
+)
+
+test_final <- cbind(
+  vital_status = test_clin$vital_status,
+  test_clin[, setdiff(names(test_clin), "vital_status")],
+  as.data.frame(test_genes[, top_genes, drop = FALSE])
+)
+
+# --- Gestion des niveaux (Catégories présentes dans Test mais pas Train) ---
+cat_cols <- names(Filter(is.factor, train_final))
+rows_to_move <- c()
+for(col in cat_cols){
+  new_values <- setdiff(unique(test_final[[col]]), unique(train_final[[col]]))
+  if(length(new_values) > 0){
+    problematic_rows <- which(test_final[[col]] %in% new_values)
+    rows_to_move <- unique(c(rows_to_move, problematic_rows))
+  }
+}
+
+if(length(rows_to_move) > 0){
+  train_final <- rbind(train_final, test_final[rows_to_move, ])
+  test_final  <- test_final[-rows_to_move, ]
+  train_final <- droplevels(train_final)
+  test_final  <- droplevels(test_final)
+}
+
+############################################################
+# 2. MODELISATION GLM & SEUIL OPTIMAL
+############################################################
+
+# Entraînement
+model_glm <- glm(vital_status ~ ., data = train_final, family = "binomial")
+
+# --- ETAPE CLÉ : Calcul du Seuil sur le TRAIN ---
+prob_train <- predict(model_glm, newdata = train_final, type = "response")
+roc_train  <- roc(train_final$vital_status, prob_train, quiet = TRUE)
+
+# Méthode de Youden : maximise (Sensibilité + Spécificité)
+seuil_optimal <- coords(roc_train, "best", best.method = "youden", transpose = FALSE)[1, "threshold"]
+cat("\nSeuil optimal déterminé sur le TRAIN (Youden) :", round(seuil_optimal, 4), "\n")
+
+############################################################
+# 3. EVALUATION SUR LE TEST
+############################################################
+
+# Prédiction Probabilités
+prob_test <- predict(model_glm, newdata = test_final, type = "response")
+
+# Application du seuil TRAIN
+pred_class <- ifelse(prob_test > seuil_optimal, 1, 0)
+
+# Matrice de Confusion
+cm <- confusionMatrix(
+  factor(pred_class, levels = c(0,1)),
+  factor(test_final$vital_status, levels = c(0,1)),
+  positive = "1"
+)
+
+# AUC Test
+roc_test <- roc(test_final$vital_status, prob_test, quiet = TRUE)
+auc_val  <- auc(roc_test)
+
+cat("\n==============================================\n")
+cat("RÉSULTATS FINAUX (Test Set) avec k =", k, "\n")
+cat("AUC :", round(auc_val, 4), "\n")
+cat("Accuracy :", round(cm$overall["Accuracy"], 4), "\n")
+cat("Sensibilité :", round(cm$byClass["Sensitivity"], 4), "\n")
+cat("==============================================\n")
+
+print(cm)
+print_metrics(name, cm)
+```
+
+          Reference
+Prediction   0   1
+         0 167  24
+         1  37  14
+
+> cat("AUC :", round(auc(roc_obj),4), "\n")
+AUC : 0.5935
+> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
+F1-score (classe 1) : 0.3146
+
+# nouvelle methode de screening avec lima
+```{r}
+name <- "Screening Limma Optimisé (Auto-Tuned)"
+
+library(caret)
+library(pROC)
+library(limma) # Indispensable
+
+# ==============================================================================
+# 0. PRÉPARATION DES DONNÉES
+# ==============================================================================
+# Chargement
+y <- as.numeric(as.character(cleaned_clinical_data_df$vital_status))
+X <- GeneX  
+set.seed(42)
+
+# Partition 80/20
+idx <- createDataPartition(y, p = 0.8, list = FALSE)
+
+train_clin  <- cleaned_clinical_data_df[idx, ]
+test_clin   <- cleaned_clinical_data_df[-idx, ]
+train_genes <- X[idx, ]
+test_genes  <- X[-idx, ]
+
+# ==============================================================================
+# 1. RECHERCHE DU 'k' OPTIMAL (CROSS-VALIDATION SUR LE TRAIN)
+# ==============================================================================
+cat("\n--- ÉTAPE 1 : OPTIMISATION DU NOMBRE DE VARIABLES (K-FOLD) ---\n")
+
+# A. Calcul du ranking LIMMA sur tout le TRAIN (pour gagner du temps)
+# Attention : Limma veut (Gènes x Patients), donc on transpose t()
+cat("Calcul des scores Limma sur le Train set...\n")
+
+design <- model.matrix(~ train_clin$vital_status)
+fit <- lmFit(t(train_genes), design)
+fit <- eBayes(fit)
+# On récupère la table complète triée par 'B' (Log-Odds) qui est le meilleur score de tri
+full_list <- topTable(fit, coef=2, number=Inf, sort.by="B") 
+genes_ranked_cv <- rownames(full_list)
+
+# B. Boucle de Validation Croisée
+k_candidates <- c(5, 10, 15, 20, 25, 30, 40, 50, 75, 100)
+mean_aucs <- c()
+folds <- createFolds(train_clin$vital_status, k = 5, list = TRUE)
+
+cat("Test des candidats k :", paste(k_candidates, collapse=", "), "\n")
+
+for (k in k_candidates) {
+  fold_aucs <- c()
+  
+  for (i in 1:5) { # 5-Fold
+    # Indices
+    idx_val <- folds[[i]]
+    idx_trn <- setdiff(seq_len(nrow(train_clin)), idx_val)
+    
+    # Selection top k
+    top_k_genes <- genes_ranked_cv[1:k]
+    
+    # Construction DF temporaires
+    df_trn <- cbind(vital = train_clin$vital_status[idx_trn], 
+                    train_clin[idx_trn, setdiff(names(train_clin), "vital_status")], 
+                    train_genes[idx_trn, top_k_genes])
+    
+    df_val <- cbind(vital = train_clin$vital_status[idx_val], 
+                    train_clin[idx_val, setdiff(names(train_clin), "vital_status")], 
+                    train_genes[idx_val, top_k_genes])
+    
+    # Modèle GLM
+    model <- glm(vital ~ ., data = df_trn, family = "binomial")
+    prob  <- predict(model, newdata = df_val, type = "response")
+    roc_curr <- roc(df_val$vital, prob, quiet = TRUE)
+    fold_aucs <- c(fold_aucs, auc(roc_curr))
+  }
+  mean_aucs <- c(mean_aucs, mean(fold_aucs))
+}
+
+# C. Sélection du gagnant
+best_k_idx <- which.max(mean_aucs)
+best_k <- k_candidates[best_k_idx]
+cat("\n>>> RÉSULTAT OPTIMISATION : Le meilleur k est", best_k, "avec une AUC moyenne de", round(mean_aucs[best_k_idx], 4), "\n")
+
+plot(k_candidates, mean_aucs, type="b", pch=19, col="purple", main="Optimisation k Limma", xlab="Nombre de variables", ylab="AUC Moyen")
+abline(v=best_k, col="red", lty=2)
+
+# ==============================================================================
+# 2. APPLICATION DU MODÈLE FINAL
+# ==============================================================================
+cat("\n--- ÉTAPE 2 : ENTRAINEMENT FINAL ET TEST ---\n")
+
+# On utilise le ranking Limma calculé au début et le best_k
+genes_ranked <- genes_ranked_cv 
+k <- best_k 
+top_genes <- genes_ranked[1:k]
+
+cat("Top", k, "gènes sélectionnés par Limma :\n")
+print(top_genes)
+
+# Datasets finaux
+train_final <- cbind(
+  vital_status = train_clin$vital_status,
+  train_clin[, setdiff(names(train_clin), "vital_status")],
+  as.data.frame(train_genes[, top_genes, drop = FALSE])
+)
+
+test_final <- cbind(
+  vital_status = test_clin$vital_status,
+  test_clin[, setdiff(names(test_clin), "vital_status")],
+  as.data.frame(test_genes[, top_genes, drop = FALSE])
+)
+
+# Gestion niveaux (Facteurs)
+cat_cols <- names(Filter(is.factor, train_final))
+rows_to_move <- c()
+for(col in cat_cols){
+  new_values <- setdiff(unique(test_final[[col]]), unique(train_final[[col]]))
+  if(length(new_values) > 0){
+    problematic_rows <- which(test_final[[col]] %in% new_values)
+    rows_to_move <- unique(c(rows_to_move, problematic_rows))
+  }
+}
+if(length(rows_to_move) > 0){
+  train_final <- rbind(train_final, test_final[rows_to_move, ])
+  test_final  <- test_final[-rows_to_move, ]
+  train_final <- droplevels(train_final)
+  test_final  <- droplevels(test_final)
+}
+
+# Modélisation
+model_glm <- glm(vital_status ~ ., data = train_final, family = "binomial")
+
+# Seuil Optimal sur TRAIN (Youden)
+prob_train <- predict(model_glm, newdata = train_final, type = "response")
+roc_train  <- roc(train_final$vital_status, prob_train, quiet = TRUE)
+seuil_optimal <- coords(roc_train, "best", best.method = "youden", transpose = FALSE)[1, "threshold"]
+cat("\nSeuil optimal déterminé sur le TRAIN (Youden) :", round(seuil_optimal, 4), "\n")
+
+# Evaluation Test
+prob_test <- predict(model_glm, newdata = test_final, type = "response")
+pred_class <- ifelse(prob_test > seuil_optimal, 1, 0)
+
+cm <- confusionMatrix(
+  factor(pred_class, levels = c(0,1)),
+  factor(test_final$vital_status, levels = c(0,1)),
+  positive = "1"
+)
+roc_test <- roc(test_final$vital_status, prob_test, quiet = TRUE)
+auc_val  <- auc(roc_test)
+
+cat("\n==============================================\n")
+cat("RÉSULTATS FINAUX LIMMA (Test Set) avec k =", k, "\n")
+cat("AUC :", round(auc_val, 4), "\n")
+cat("Accuracy :", round(cm$overall["Accuracy"], 4), "\n")
+cat("Sensibilité :", round(cm$byClass["Sensitivity"], 4), "\n")
+cat("==============================================\n")
+
+print(cm)
+print_metrics(name, cm)
+```
+          Reference
+Prediction   0   1
+         0 160  21
+         1  44  17
+
+> cat("AUC :", round(auc(roc_obj),4), "\n")
+AUC : 0.6293
+> cat("F1-score (classe 1) :", round(f1_score,4), "\n")
+F1-score (classe 1) : 0.3434
+
+
+
+```{r}
+name <- "glm (lasso GeneX) et cleaned_clinical_data"
+
+library(glmnet)
+library(caret)
+library(pROC)
+library(dplyr)
+
+set.seed(42)
+
+# --- 1. Préparation ---
+# On s'assure que y est numérique 0/1 pour glmnet
+y <- as.numeric(as.character(cleaned_clinical_data_df$vital_status))
+X_genes <- as.matrix(GeneX)
+X_clinical <- cleaned_clinical_data_df %>% dplyr::select(-vital_status)
+
+# Split (Toujours screener sur le TRAIN uniquement !)
+train_idx <- createDataPartition(y, p = 0.8, list = FALSE)
+
+y_train <- y[train_idx]
+y_test  <- y[-train_idx]
+X_genes_train <- X_genes[train_idx, ]
+X_genes_test  <- X_genes[-train_idx, ]
+df_clin_train <- X_clinical[train_idx, ]
+df_clin_test  <- X_clinical[-train_idx, ]
+
+# --- 2. SCREENING par LASSO sur les gènes uniquement ---
+# On cherche les gènes qui ont un coefficient non nul
+cv_lasso_screen <- cv.glmnet(X_genes_train, y_train, family = "binomial", alpha = 1)
+
+# On extrait les coefficients au lambda optimal
+tmp_coeffs <- coef(cv_lasso_screen, s = "lambda.1se") # ou lambda.min pour plus de gènes
+selected_genes_indices <- which(tmp_coeffs != 0)
+# On retire l'intercept (le premier élément)
+selected_genes_indices <- selected_genes_indices[selected_genes_indices != 1] 
+# On récupère les noms (attention au décalage d'indice dû à l'intercept)
+selected_genes_names <- rownames(tmp_coeffs)[selected_genes_indices]
+
+cat("Nombre de gènes sélectionnés par le screening Lasso :", length(selected_genes_names), "\n")
+print(selected_genes_names)
+
+# --- 3. Construction du Dataset FINAL (Clinique + Gènes élus) ---
+# On ne garde que les gènes élus dans le train et le test
+X_genes_train_screened <- X_genes_train[, selected_genes_names, drop = FALSE]
+X_genes_test_screened  <- X_genes_test[, selected_genes_names, drop = FALSE]
+
+# Fusion avec la clinique
+data_train_final <- cbind(vital_status = y_train, df_clin_train, X_genes_train_screened)
+data_test_final  <- cbind(vital_status = y_test, df_clin_test, X_genes_test_screened)
+
+
+
+# --- Identifier les colonnes catégorielles ---
+cat_cols <- names(Filter(is.factor, data_train_final))
+
+# --- 4. Modèle Final (GLM simple maintenant que le nombre de variables est réduit) ---
+model_final <- glm(vital_status ~ ., data = data_train_final, family = "binomial")
+
+prob_train <- predict(model_final, newdata = data_train_final, type = "response")
+roc_train  <- roc(data_train_final$vital_status, prob_train, quiet = TRUE)
+seuil_optimal <- coords(roc_train, "best", best.method = "youden", transpose = FALSE)[1, "threshold"]
+cat("\nSeuil optimal déterminé sur le TRAIN (Youden) :", round(seuil_optimal, 4),"\n")
+
+# Prédiction
+# --- 5. Prédictions sur le TEST ---
+pred_prob <- predict(model_final, newdata = data_test_final, type = "response")
+roc_obj <- roc(data_test_final$vital_status, pred_prob)
+auc_val <- auc(roc_obj)
+
+cat("\n--- RÉSULTATS APRÈS LASSO SCREENING ---\n")
+cat("AUC :", round(auc_val, 4), "\n")
+
+# Matrice de confusion
+pred_class <- ifelse(pred_prob > seuil_optimal, 1, 0)
+cm <- confusionMatrix(factor(pred_class, levels=c(0,1)), 
+                      factor(data_test_final$vital_status, levels=c(0,1)), 
+                      positive="1")
+
+
+print_metrics(name,cm)
+```
+          Reference
+Prediction   0   1
+         0 126   7
+         1  78  31
+
+```{r}
+name <- "Random Forest (Clin + 41 Genes)"
+
+# --- CHARGEMENT DES PACKAGES ---
+if(!require(randomForest)){ install.packages("randomForest"); library(randomForest) }
+if(!require(glmnet)){ library(glmnet) }
+if(!require(caret)){ library(caret) }
+if(!require(pROC)){ library(pROC) }
+if(!require(dplyr)){ library(dplyr) }
+
+set.seed(42)
+
+# ==============================================================================
+# ÉTAPE 1 : RECONSTRUCTION DU DATASET (SCREENING LASSO)
+# (On refait cette étape pour s'assurer que 'data_train_final' existe)
+# ==============================================================================
+
+# 1. Préparation
+y <- as.numeric(as.character(cleaned_clinical_data_df$vital_status))
+X_genes <- as.matrix(GeneX)
+X_clinical <- cleaned_clinical_data_df %>% dplyr::select(-vital_status)
+
+# 2. Split (Identique aux autres modèles)
+train_idx <- createDataPartition(y, p = 0.8, list = FALSE)
+y_train <- y[train_idx]
+y_test  <- y[-train_idx]
+X_genes_train <- X_genes[train_idx, ]
+X_genes_test  <- X_genes[-train_idx, ]
+df_clin_train <- X_clinical[train_idx, ]
+df_clin_test  <- X_clinical[-train_idx, ]
+
+# 3. Screening par Lasso (Train uniquement)
+cv_lasso_screen <- cv.glmnet(X_genes_train, y_train, family = "binomial", alpha = 1)
+tmp_coeffs <- coef(cv_lasso_screen, s = "lambda.1se")
+selected_genes_indices <- which(tmp_coeffs != 0)
+selected_genes_indices <- selected_genes_indices[selected_genes_indices != 1] # Retirer intercept
+selected_genes_names <- rownames(tmp_coeffs)[selected_genes_indices]
+
+cat("Gènes utilisés pour le Random Forest :", length(selected_genes_names), "\n")
+
+# 4. Création des datasets finaux
+X_genes_train_screened <- X_genes_train[, selected_genes_names, drop = FALSE]
+X_genes_test_screened  <- X_genes_test[, selected_genes_names, drop = FALSE]
+
+rf_train <- cbind(vital_status = y_train, df_clin_train, X_genes_train_screened)
+rf_test  <- cbind(vital_status = y_test, df_clin_test, X_genes_test_screened)
+
+# ==============================================================================
+# ÉTAPE 2 : RANDOM FOREST
+# ==============================================================================
+
+# 1. Conversion en FACTEUR avec labels Textuels (Obligatoire pour RF Classification)
+# 0 -> "Alive", 1 -> "Dead"
+rf_train$vital_status <- factor(rf_train$vital_status, levels = c(0, 1), labels = c("Alive", "Dead"))
+rf_test$vital_status  <- factor(rf_test$vital_status, levels = c(0, 1), labels = c("Alive", "Dead"))
+
+# Nettoyage des noms de colonnes pour RF
+colnames(rf_train) <- make.names(colnames(rf_train))
+colnames(rf_test)  <- make.names(colnames(rf_test))
+
+# 2. Entraînement
+cat("Entraînement du Random Forest...\n")
+rf_model <- randomForest(vital_status ~ ., 
+                         data = rf_train, 
+                         ntree = 500, 
+                         mtry = sqrt(ncol(rf_train)-1),
+                         importance = TRUE)
+
+# 3. Optimisation du Seuil sur le TRAIN
+# RF sort la probabilité d'être "Dead"
+prob_train_rf <- predict(rf_model, newdata = rf_train, type = "prob")[, "Dead"]
+
+roc_train_rf <- roc(rf_train$vital_status, prob_train_rf, levels = c("Alive", "Dead"), direction = "<", quiet = TRUE)
+seuil_optimal_rf <- coords(roc_train_rf, "best", best.method = "youden")[1, "threshold"]
+cat("Seuil optimal (RF) déterminé sur le TRAIN :", round(seuil_optimal_rf, 4), "\n")
+
+# 4. Prédiction sur le TEST
+prob_test_rf <- predict(rf_model, newdata = rf_test, type = "prob")[, "Dead"]
+pred_class_rf <- ifelse(prob_test_rf > seuil_optimal_rf, "Dead", "Alive")
+
+# 5. Évaluation
+roc_test_rf <- roc(rf_test$vital_status, prob_test_rf, levels = c("Alive", "Dead"), direction = "<", quiet = TRUE)
+auc_val_rf <- auc(roc_test_rf)
+
+cm_rf <- confusionMatrix(factor(pred_class_rf, levels = c("Alive", "Dead")), 
+                         factor(rf_test$vital_status, levels = c("Alive", "Dead")), 
+                         positive = "Dead")
+
+cat("\n--- RÉSULTATS RANDOM FOREST ---\n")
+cat("AUC :", round(auc_val_rf, 4), "\n")
+print_metrics(name,cm_rf)
+```
+
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# 2. Calcul de la distance
+plot_data <- modol_results %>%
+  mutate(
+    dist_to_perfect = sqrt((1 - Accuracy)^2 + (1 - Sensitivity)^2),
+    # On crée une étiquette avec le nom ET la distance
+    label_text = paste0(Model, "\n(Dist: ", round(dist_to_perfect, 3), ")")
+  )
+
+# 3. Le Graphique
+ggplot(plot_data, aes(x = Accuracy, y = Sensitivity, color = Model)) +
+  
+  # A. LIGNES VERS LA CIBLE
+  geom_segment(aes(xend = 1, yend = 1), linetype = "dotted", alpha = 0.4, color = "gray60") +
+
+  # B. LA CIBLE (1, 1)
+  annotate("point", x = 1, y = 1, shape = 8, size = 5, color = "black") + 
+  annotate("text", x = 1, y = 1, label = "Idéal", vjust = -1.5, fontface = "bold") +
+
+  # C. LES POINTS
+  geom_point(size = 7, alpha = 0.9) + 
+  
+  # D. ÉTIQUETTES INTELLIGENTES
+  geom_label_repel(
+    aes(label = label_text),
+    box.padding = 0.6,    # Espace autour des boites
+    point.padding = 0.5,  # Distance par rapport au point
+    size = 3,             # Taille du texte un peu réduite car beaucoup de texte
+    max.overlaps = 20,    # Autorise le chevauchement si nécessaire pour tout afficher
+    force = 20,           # Force les étiquettes à s'écarter davantage
+    show.legend = FALSE   # Pas de légende pour le texte
+  ) +
+  
+  # E. AXES ET ÉCHELLE
+  # Important : on part de 0.2 (ou 0) pour inclure les valeurs basses comme 0.32
+  scale_x_continuous(limits = c(0.2, 1.05), labels = scales::percent, name = "Accuracy (Précision)") +
+  scale_y_continuous(limits = c(0.2, 1.05), labels = scales::percent, name = "Sensitivity (Sensibilité)") +
+  
+  # Carré parfait
+  coord_fixed(ratio = 1) +
+  
+  # F. ESTHÉTIQUE
+  labs(
+    title = "Comparaison de la performance des modèles",
+    subtitle = "Distance euclidienne vers le modèle parfait (1,1)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none", # ON SUPPRIME LA LÉGENDE (redondante)
+    panel.grid.minor = element_blank()
+  )
+
+  # Sauvegarde dans le dossier courant
+ggsave(
+  filename = "../results/model_comparison.png", 
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+```
+
+```{r}
+1+1
+```

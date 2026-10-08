@@ -1,0 +1,709 @@
+---
+title: "Breast cancer outcome: data cleaning"
+author: "Bilâl Jaiel, Kalaivaasan Balakumar"
+date: "2025-11-10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages({
+  library(S4Vectors)  # clinical_data is stored as an S4Vectors DataFrame
+  library(dplyr); library(tidyr); library(stringr); library(forcats)
+  library(ggplot2); library(caret)
+})
+dir.create("../data/processed", showWarnings = FALSE, recursive = TRUE)
+```
+
+
+## Classification of Cancer outcome using Genetic and Clinical data
+
+# Introduction
+
+This project investigates the effect of genetic and clinical variables on the survival outcome of breast cancer patients. The data contains records of more than 1000 breast cancer patients from several research institutions. Clinical data contains patient-related and tumor-related information. Additionally mRNA gene expression data is available for each patient. The gene expression data has been processed to include only the top 5000 most variable genes on the transformed scale (log2(counts + 1)).
+
+We consider that the main outcome variable of interest is **vital_status**, which is defined in clinical data.
+
+## Load data
+
+```{r cars}
+load('../data/raw/mrr_bio.Rdata')
+```
+
+## Exploration des données : Clinical_data
+On va commencer par explorer le tableau clinical_data pour mieux comprendre sa structure et ses caractéristiques.
+
+Concentronons-nous maintenant sur la détection des valeurs manquantes dans le tableau clinical_data.
+
+# On commence par retirer les lignes avec des valeurs manquantes dans la variable cible vital_status.
+
+```{r}
+# On retire les lignes du dataset dont la valeur dans vital_status est manquante
+initial_n_row <- nrow(clinical_data)
+valid_indices <- which(!is.na(clinical_data$vital_status))
+
+clinical_data <- clinical_data[valid_indices, ]
+GeneX <- GeneX[valid_indices, ]
+
+```
+
+```{r}
+
+# Séparer les colonnes numériques et non numériques
+non_num_data <- clinical_data[, !sapply(clinical_data, is.numeric)]
+num_data <- clinical_data[, sapply(clinical_data, is.numeric)]
+
+num_data <- as.data.frame(num_data) # s'assurer que num_data est un data.frame pour appliquer summary
+
+```
+
+
+### CCA sur les gènes et la collone vital_status
+```{r}
+Vitalstat <- ifelse(clinical_data$vital_status == "Dead", 1,
+                    ifelse(clinical_data$vital_status == "Alive", 0, NA))
+
+Y <- matrix(Vitalstat, ncol = 1)
+combined <- cbind(Y, GeneX)
+
+combined_clean <- combined[complete.cases(combined), ]
+
+Y_clean <- as.matrix(combined_clean[, 1])
+GeneX_pca <- combined_clean[, -1]
+
+pca <- prcomp(GeneX_pca, scale. = TRUE)
+
+k <- 100
+Z_clean <- pca$x[, 1:k]
+cca_res <- cancor(Z_clean, Y_clean)
+cca_res$cor
+sum(pca$sdev[1:10]^2) / sum(pca$sdev^2) * 100
+
+
+```
+
+## On va procéder à un nettoyage des données avant de continuer l'analyse.
+
+Les valeurs manquantes sont désigné dans le dataset par les noms suivant : NA, Unknown, Not Reported, not reported, NULL.
+
+Nous allons uniformiser ces différentes désignations en utilisant uniquement NA pour représenter les valeurs manquantes.
+
+# On remplace les différentes désignations des valeurs manquantes par NA
+```{r}
+cleaned_clinical_data_df <- as.data.frame(clinical_data)
+cleaned_clinical_data_df[] <- lapply(cleaned_clinical_data_df, function(x) {
+  x[x %in% c("Unknown", "Not Reported", "not reported", "NULL")] <- NA
+  x
+})
+```
+
+```{r}
+
+# Afficher les fréquaneces de la variable classification_of_tumor
+table(cleaned_clinical_data_df$classification_of_tumor, useNA = "ifany")
+```
+
+```{r}
+
+# --- 4. TRANSFORMATION TYPE DE TUMEUR ---
+# On regroupe tout ce qui n'est pas "primary" ensemble (car plus grave)
+
+cleaned_clinical_data_df <- cleaned_clinical_data_df %>%
+  mutate(tumor_category = fct_collapse(classification_of_tumor,
+    Primary = c("primary"),
+    Non_Primary = c("metastasis", "Prior primary", "recurrence", 
+                    "Subsequent Primary", "Synchronous primary")
+  )) %>%
+  select(-classification_of_tumor)
+```
+```{r}
+    # Afficher les fréquaneces de la variable classification_of_tumor
+  table(cleaned_clinical_data_df$tumor_category, useNA = "ifany")
+
+  # Détection et suppression des variables à faible variance
+```
+```{r}
+  # On utilise la librairie caret pour détecter les variables à faible variance. C'est à dire les variables qui n'apportent pas d'information pertinente pour la modélisation car quasi-constantes.
+  library(caret)
+
+  cleaned_clinical_data2 <- cleaned_clinical_data_df[ , sapply(cleaned_clinical_data_df, is.atomic)]
+  cleaned_clinical_data2 <- cleaned_clinical_data2[ , !sapply(cleaned_clinical_data2, is.list)]
+
+  nzv_result <- nearZeroVar(cleaned_clinical_data2, saveMetrics = TRUE)
+
+
+  print(nzv_result)
+
+  # Pour voir uniquement les variables à supprimer (celles qui sont TRUE)
+  # 1. Trouver les colonnes à supprimer
+  cols_to_remove <- rownames(nzv_result)[nzv_result$nzv == TRUE]
+  cat("Colonnes à supprimer selon le filtre :", cols_to_remove, "\n")
+
+  colnames(cleaned_clinical_data_df)
+  cleaned_clinical_data_df <- cleaned_clinical_data_df[, !(colnames(cleaned_clinical_data_df) %in% cols_to_remove)]
+  dim(cleaned_clinical_data_df)
+  colnames(cleaned_clinical_data_df)
+
+```
+
+# Détection et suppression des variables quasi-uniques
+
+```{r}
+  # A l'inverse maintenant on cherche les variables avec des valeurs quasi uniques qui n'apportent pas d'information pertinente.
+
+  # On se concentre sur les variables catégorielles
+  cat_cols <- sapply(cleaned_clinical_data_df, is.factor) | sapply(cleaned_clinical_data_df, is.character)
+  categorical_data <- cleaned_clinical_data_df[, cat_cols]
+
+  # Calcul du pourcentage de valeurs uniques pour chaque colonne
+  unique_pct <- sapply(categorical_data, function(x) length(unique(x)) / length(x) * 100)
+
+  # Choisir un seuil pour considérer qu'une colonne est quasi-unique (ex: >90%)
+  threshold <- 90
+  cols_quasi_unique <- names(unique_pct[unique_pct > threshold])
+  cat("Colonnes catégorielles quasi-uniques :", cols_quasi_unique, "\n")
+
+  # Visualisation avec un barplot
+  library(ggplot2)
+  unique_df <- data.frame(
+    Variable = names(unique_pct),
+    PercentUnique = unique_pct
+  )
+
+  ggplot(unique_df, aes(x = reorder(Variable, PercentUnique), y = PercentUnique)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    coord_flip() +
+    geom_hline(yintercept = threshold, color = "red", linetype = "dashed") +
+    labs(title = "Pourcentage de valeurs uniques par variable catégorielle",
+        y = "% de valeurs uniques",
+        x = "Variables") +
+    theme_minimal(base_size = 12)
+
+  # On retire les colonnes quasi-uniques de cleaned_clinical_data
+  cleaned_clinical_data_df <- cleaned_clinical_data_df[, !(colnames(cleaned_clinical_data_df) %in% cols_quasi_unique)]
+  dim(cleaned_clinical_data_df) # vérifier les dimensions finales
+
+```
+
+  # On peut remarquer que certaines colonnes ne contiennent qu'une seule valeur.
+```
+
+  # On remarque que les colones disease_type et primary_site ont des valeurs qui sont des vecteurs mais identique pour chaque patient. On va les retirer du dataset.
+  # Elles n'ont pas été détecter car elle sont sous forme de listes
+```{r}
+  cleaned_clinical_data_df <- cleaned_clinical_data_df[, !(colnames(cleaned_clinical_data_df) %in% c("disease_type", "primary_site"))]
+  dim(cleaned_clinical_data_df)
+```
+
+```{r}
+# Vérification des valeurs manquantes
+any(is.na(cleaned_clinical_data_df)) # TRUE s'il y a des NA
+sum(is.na(cleaned_clinical_data_df)) # nombre total de NA
+
+# nombre de NA, Unknown, not reported, NULL, Not Reported par colonne 
+NA_count_col <- sapply(cleaned_clinical_data_df, function(x) sum(is.na(x)))
+Total <- NA_count_col
+
+df_missing <- data.frame(
+Donnees_manquantes = (Total / nrow(cleaned_clinical_data_df)) * 100,
+Total = Total,
+NA_count = NA_count_col
+)
+print(df_missing)
+
+# Nombre de NA par ligne
+NA_count_row <- apply(cleaned_clinical_data_df, 1, function(x) sum(is.na(x)))
+Total_row <- NA_count_row
+
+# Création du data.frame pour les lignes
+data_frame_row <- data.frame(
+Donnees_manquantes = (Total_row / ncol(cleaned_clinical_data_df)) * 100,
+Total = Total_row,
+NA_count = NA_count_row,
+row.names = rownames(cleaned_clinical_data_df)
+)
+
+# Tri par ordre décroissant
+data_frame_row_sorted <- data_frame_row[order(-data_frame_row$Donnees_manquantes), ]
+
+# Affichage des 50 premières lignes
+head(data_frame_row_sorted, 44)
+```
+  
+# 43 patients indiquent un nombre de valeurs manquantes supérieur à 30 % donc on décide de supprimé ses observations 
+```{r}
+# Récupérer les noms des lignes à supprimer
+rows_to_remove <- rownames(head(data_frame_row_sorted, 43))
+
+# Supprimer ces lignes du dataset original
+GeneX <- GeneX[!(rownames(cleaned_clinical_data_df) %in% rows_to_remove), ]
+cleaned_clinical_data_df <- cleaned_clinical_data_df[!(rownames(cleaned_clinical_data_df) %in% rows_to_remove), ]
+
+# Vérification
+dim(cleaned_clinical_data_df)  # nombre de lignes et colonnes après suppression
+dim(GeneX)
+```
+
+  # Pour traiter les valeurs manquantes on va chercher à identifier par colones à quels catégorie elles appartiennent : 
+  # MCAR : Manquant complètement au hasard : aucune structure → on peut supprimer sans problème.
+  # MAR : Manquant au hasard conditionnel : prévisible via d’autres variables → on peut imputer.
+  # MNAR : Manquant non aléatoirement : dépend d’une valeur non mesurée → très délicat → souvent on crée une catégorie "Not reported".
+
+  # race et morphology
+```{r}
+  # On remplace les Na dans la colone race par "Unknown"
+  cleaned_clinical_data_df$race[is.na(cleaned_clinical_data_df$race)] <- "Unknown"
+
+  # On remplace les Na dans la colone ajcc pathologic t par "Tx"
+  cleaned_clinical_data_df$ajcc_pathologic_t[is.na(cleaned_clinical_data_df$ajcc_pathologic_t)] <- "TX"
+
+  # On remplace laterality par "Unknown"
+  cleaned_clinical_data_df$laterality[is.na(cleaned_clinical_data_df$laterality)] <- "Unknown"
+
+  # On remplace les Na dans morphology par "Unknown"
+  cleaned_clinical_data_df$morphology[is.na(cleaned_clinical_data_df$morphology)] <- "Unknown"
+
+```
+
+  La variable follow_ups_disease_response est retirée car elle fortement corrélé au statut vital (0.6) constitue une fuite de données (Data Leakage). Elle contient une information post-traitement ($T+1$) indisponible au moment du diagnostic ($T_0$), ce qui ferait 'tricher' le modèle en lui fournissant la réponse à l'avance.
+
+```{r}
+  # On retire la colone follows_ups_disease_response
+  cleaned_clinical_data_df <- cleaned_clinical_data_df[, !(colnames(cleaned_clinical_data_df) %in% c("follow_ups_disease_response"))]
+```
+
+
+```{r}
+  med_age <- median(cleaned_clinical_data_df$age_at_diagnosis, na.rm = TRUE)
+  cleaned_clinical_data_df$age_at_diagnosis[is.na(cleaned_clinical_data_df$age_at_diagnosis)] <- med_age
+  sum(is.na(cleaned_clinical_data_df$age_at_diagnosis))
+```
+
+```{r}
+  library(dplyr)
+  library(tidyr)
+
+  # On remplace les NA par la valeur la plus fréquente : "No"
+  cleaned_clinical_data_df$prior_treatment <- cleaned_clinical_data_df$prior_treatment %>%
+    replace_na("No")
+
+  # Vérification (il ne doit plus y avoir de NA)
+  table(cleaned_clinical_data_df$prior_treatment, useNA = "always")
+```
+
+  # primary_diagnosis
+  Pour la variable primary_diagnosis, nous avons choisi de remplacer les valeurs manquantes par une catégorie explicite 'Unknown'.
+
+  Cette stratégie a été privilégiée à l'imputation par la mode (la valeur la plus fréquente) afin d'éviter tout biais de confirmation. En effet, attribuer arbitrairement le diagnostic majoritaire (Infiltrating duct carcinoma) à ces patients risquerait de masquer des pathologies plus complexes ou atypiques. La catégorie 'Unknown' permet ainsi de conserver l'ensemble des patients dans l'analyse tout en reflétant fidèlement l'incertitude médicale de ces dossiers.
+
+```{r}
+  library(dplyr)
+  library(tidyr)
+
+  cleaned_clinical_data_df$primary_diagnosis <- as.character(cleaned_clinical_data_df$primary_diagnosis)
+
+  cleaned_clinical_data_df$primary_diagnosis <- cleaned_clinical_data_df$primary_diagnosis %>%
+    replace_na("Unknown")
+
+  # 3. On remet en facteur (optionnel, mais propre pour la suite)
+  cleaned_clinical_data_df$primary_diagnosis <- as.factor(cleaned_clinical_data_df$primary_diagnosis)
+```
+
+```{r}
+  #intial_weight
+  library(dplyr)
+  library(tidyr)
+  med_weight <- median(cleaned_clinical_data_df$initial_weight, na.rm = TRUE)
+  cleaned_clinical_data_df$initial_weight[is.na(cleaned_clinical_data_df$initial_weight)] <- med_weight
+
+
+  cleaned_clinical_data_df$diagnosis_is_primary_disease <- cleaned_clinical_data_df$diagnosis_is_primary_disease %>%
+    replace_na(TRUE) 
+
+
+  med_days <- median(cleaned_clinical_data_df$days_to_last_follow_up, na.rm = TRUE)
+  cleaned_clinical_data_df$days_to_last_follow_up[is.na(cleaned_clinical_data_df$days_to_last_follow_up)] <- med_days
+
+  med_birth <- median(cleaned_clinical_data_df$days_to_birth, na.rm = TRUE)
+  cleaned_clinical_data_df$days_to_birth[is.na(cleaned_clinical_data_df$days_to_birth)] <- med_birth
+```
+
+```{r}
+  # Vérification des valeurs manquantes
+  any(is.na(cleaned_clinical_data_df)) # TRUE s'il y a des NA
+  sum(is.na(cleaned_clinical_data_df)) # nombre total de NA
+
+  # nombre de NA, Unknown, not reported, NULL, Not Reported par colonne 
+  NA_count_col <- sapply(cleaned_clinical_data_df, function(x) sum(is.na(x)))
+  Total <- NA_count_col
+
+  df_missing <- data.frame(
+    Donnees_manquantes = (Total / nrow(cleaned_clinical_data_df)) * 100,
+    Total = Total,
+    NA_count = NA_count_col
+  )
+  print(df_missing)
+
+  # Nombre de NA par ligne
+  NA_count_row <- apply(cleaned_clinical_data_df, 1, function(x) sum(is.na(x)))
+  Total_row <- NA_count_row
+
+  # Création du data.frame pour les lignes
+  data_frame_row <- data.frame(
+    Donnees_manquantes = (Total_row / ncol(cleaned_clinical_data_df)) * 100,
+    Total = Total_row,
+    NA_count = NA_count_row,
+    row.names = rownames(cleaned_clinical_data_df)
+  )
+
+  # Tri par ordre décroissant
+  data_frame_row_sorted <- data_frame_row[order(-data_frame_row$Donnees_manquantes), ]
+
+  # Affichage des 50 premières lignes
+  head(data_frame_row_sorted, 50)
+```
+
+  # On prend race à partir d'un certain seuil on les mets dans other (d'ailleur les unknown deviennent other)
+
+```{r}
+
+  # On remplace les races qui représente moins de 10% du dataset et on les mets en Ohter
+  race_counts <- table(cleaned_clinical_data_df$race)
+  total_count <- sum(race_counts)
+  # Vecteur qui contient les pourcentage correspondant
+  race_percent <- (race_counts / total_count) * 100
+
+  # Seuil en pourcentage
+  seuil <- 5
+
+  # Si le pourcentage est inférieur au seuil, on remplace par "Other"
+  cleaned_clinical_data_df$race <- sapply(cleaned_clinical_data_df$race, function(x) {
+    if(race_percent[x] < seuil) {
+      return("Unknown")
+    } else {
+      return(x)
+    }
+  })
+
+  table(cleaned_clinical_data_df$race)
+```
+
+
+  # primary_diagnosis
+  # ajcc_pathologic_t
+  # morphology
+
+# On encode vital_status en 0 1 pour l'entrainement.
+```{r}
+clinical_data$vital_status <- ifelse(clinical_data$vital_status == "Dead", 1, 0)
+cleaned_clinical_data_df$vital_status <- ifelse(cleaned_clinical_data_df$vital_status == "Dead", 1, 0)
+```
+
+# les variables avec peu de variables manquantes
+initial_weight
+diagnosis_is_primary_disease
+days_to_last_follow_up
+days_to_birth
+```{r}
+table(cleaned_clinical_data_df$initial_weight, useNA = "ifany")
+table(cleaned_clinical_data_df$diagnosis_is_primary_disease, useNA = "ifany")
+table(cleaned_clinical_data_df$days_to_last_follow_up, useNA = "ifany")
+table(cleaned_clinical_data_df$days_to_birth, useNA = "ifany")
+```
+
+```{r}
+#intial_weight
+library(dplyr)
+library(tidyr)
+med_weight <- median(cleaned_clinical_data_df$initial_weight, na.rm = TRUE)
+cleaned_clinical_data_df$initial_weight[is.na(cleaned_clinical_data_df$initial_weight)] <- med_weight
+
+
+cleaned_clinical_data_df$diagnosis_is_primary_disease <- cleaned_clinical_data_df$diagnosis_is_primary_disease %>%
+replace_na(TRUE) 
+
+
+med_days <- median(cleaned_clinical_data_df$days_to_last_follow_up, na.rm = TRUE)
+cleaned_clinical_data_df$days_to_last_follow_up[is.na(cleaned_clinical_data_df$days_to_last_follow_up)] <- med_days
+
+med_birth <- median(cleaned_clinical_data_df$days_to_birth, na.rm = TRUE)
+cleaned_clinical_data_df$days_to_birth[is.na(cleaned_clinical_data_df$days_to_birth)] <- med_birth
+```
+
+```{r}
+# Vérification des valeurs manquantes
+any(is.na(cleaned_clinical_data_df)) # TRUE s'il y a des NA
+sum(is.na(cleaned_clinical_data_df)) # nombre total de NA
+
+# nombre de NA, Unknown, not reported, NULL, Not Reported par colonne 
+NA_count_col <- sapply(cleaned_clinical_data_df, function(x) sum(is.na(x)))
+Total <- NA_count_col
+
+df_missing <- data.frame(
+Donnees_manquantes = (Total / nrow(cleaned_clinical_data_df)) * 100,
+Total = Total,
+NA_count = NA_count_col
+)
+print(df_missing)
+
+# Nombre de NA par ligne
+NA_count_row <- apply(cleaned_clinical_data_df, 1, function(x) sum(is.na(x)))
+Total_row <- NA_count_row
+
+# Création du data.frame pour les lignes
+data_frame_row <- data.frame(
+Donnees_manquantes = (Total_row / ncol(cleaned_clinical_data_df)) * 100,
+Total = Total_row,
+NA_count = NA_count_row,
+row.names = rownames(cleaned_clinical_data_df)
+)
+
+# Tri par ordre décroissant
+data_frame_row_sorted <- data_frame_row[order(-data_frame_row$Donnees_manquantes), ]
+
+# Affichage des 50 premières lignes
+head(data_frame_row_sorted, 50)
+```
+
+
+```{r}
+non_num_data <- cleaned_clinical_data_df[, !sapply(cleaned_clinical_data_df, is.numeric)]
+
+# Boucle sur chaque colonne non numérique pour afficher les fréquences
+for(col_name in names(non_num_data)) {
+cat("Colonne :", col_name, "\n")
+# convertir en vecteur simple de caractères si nécessaire
+vec <- as.character(non_num_data[[col_name]])
+# supprimer les éléments NULL ou NA multiples
+vec <- unlist(vec)
+vec <- vec[!is.na(vec)]
+# afficher la table de fréquences
+print(table(vec))
+cat("\n")
+}
+```
+
+##### DATASETS
+# data set clinical data en supprimant les lignes avec NA
+# dans notre cleaned_clinical_data on a déja remplis des na, on reconstruit donc le data set brut en retirant les na
+```{r}
+library(caret)
+library(dplyr)
+df_clinical_data_brut <- clinical_data
+
+vars_to_remove <- c("diagnosis_is_primary_disease","classification_of_tumor","site_Breast","primary_site", "disease_type", "morphology",
+                    "days_to_last_follow_up", "follow_ups_disease_response", 
+                    "bcr_patient_barcode", "days_to_birth", "tissue_type",
+                    "year_of_diagnosis", "year_of_birth")
+
+df_clinical_data_brut <- df_clinical_data_brut[, !names(df_clinical_data_brut) %in% vars_to_remove]
+
+if("prior_treatment" %in% names(df_clinical_data_brut)) {
+    df_clinical_data_brut <- df_clinical_data_brut[which(df_clinical_data_brut$prior_treatment != "Not Reported"), ]
+}
+
+cols_list <- sapply(df_clinical_data_brut, is.list)
+for(col in names(df_clinical_data_brut)[cols_list]) {
+if(col == "sites_of_involvement") next 
+df_clinical_data_brut[[col]] <- as.factor(sapply(df_clinical_data_brut[[col]], paste, collapse=" "))
+}
+
+df_clinical_data_brut$sites_temp <- sapply(df_clinical_data_brut$sites_of_involvement, function(x) {
+if(is.null(x) || length(x) == 0 || all(is.na(x))) return(NA) 
+return(paste(x, collapse = " "))
+})
+categories <- c("Breast", "Bone", "Liver", "Lung", "Lymph", "Skin", "Abdomen")
+for(mot in categories) {
+col_name <- paste0("site_", mot)
+df_clinical_data_brut[[col_name]] <- ifelse(grepl(mot, df_clinical_data_brut$sites_temp, ignore.case = TRUE), 1, 0)
+}
+df_clinical_data_brut$sites_of_involvement <- NULL
+df_clinical_data_brut$sites_temp <- NULL
+
+vars_cat <- c("primary_diagnosis", "race", "ethnicity", "ajcc_pathologic_t", "tissue_or_organ_of_origin")
+seuil_min <- 20 
+
+for(col in vars_cat) {
+ if(col %in% names(df_clinical_data_brut)) {
+    vec <- as.character(df_clinical_data_brut[[col]])
+    counts <- table(vec)
+    rares <- names(counts[counts < seuil_min])
+
+    if(length(rares) > 0) {
+    vec[vec %in% rares] <- "Other"
+    if(length(unique(vec)) < 2) next 
+    }
+    df_clinical_data_brut[[col]] <- as.factor(vec)
+    }
+}
+```
+
+# On converti en factor les variables catégorielle
+
+```{r} 
+cat_cols <- names(Filter(is.character, cleaned_clinical_data_df))
+
+# Conversion en factor AVANT split
+for(col in cat_cols){
+    cleaned_clinical_data_df[[col]] <- factor(cleaned_clinical_data_df[[col]])
+}
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(forcats)
+
+# Copie de sécurité
+df_clean <- cleaned_clinical_data_df
+
+# --- 1. SUPPRESSIONS --- !!!!!!!!!!!!!!!!!!!!!TESTE AVEC ET SANS!!!!!!!!!!!!!!!!!!!!
+# Nous avons constaté que la variable morphology (codes ICD-O-3) était une traduction codée de la variable primary_diagnosis. Pour éviter une multicolinéarité parfaite et rendre l'interprétation plus fluide, nous avons conservé uniquement la version textuelle (primary_diagnosis) et supprimé la version codée."
+# on retire la variable morphology de cleaned_clinical_data_df
+df_clean <- df_clean %>%
+  select(-morphology)
+# On retire les variables inutiles, bruitées ou administratives
+
+
+# --- 2. TRANSFORMATION HISTOLOGIE (Primary Diagnosis) ---
+df_clean <- df_clean %>%
+  mutate(histology_group = case_when(
+    str_detect(primary_diagnosis, regex("duct", ignore_case = TRUE)) ~ "Ductal",
+    str_detect(primary_diagnosis, regex("lobular", ignore_case = TRUE)) ~ "Lobular",
+    TRUE ~ "Other_Rare"
+  )) %>%
+  mutate(histology_group = as.factor(histology_group)) %>%
+  select(-primary_diagnosis) # On supprime l'originale
+
+# --- 3. TRANSFORMATION STADE T (AJCC) ---
+df_clean <- df_clean %>%
+  mutate(ajcc_pathologic_t = as.character(ajcc_pathologic_t)) %>%
+  mutate(ajcc_group = case_when(
+    str_detect(ajcc_pathologic_t, "T1") ~ "T1",
+    str_detect(ajcc_pathologic_t, "T2") ~ "T2",
+    str_detect(ajcc_pathologic_t, "T3") ~ "T3",
+    str_detect(ajcc_pathologic_t, "T4") ~ "T4",
+    TRUE ~ "Other_Unknown" # Capture Tis, TX, NA
+  )) %>%
+  mutate(ajcc_group = as.factor(ajcc_group)) %>%
+  select(-ajcc_pathologic_t)
+
+# --- 6. SAUVEGARDE ---
+cleaned_clinical_data_df <- df_clean
+
+# Vérification
+glimpse(cleaned_clinical_data_df)
+```
+
+```{r}
+# library(dplyr)
+# library(stringr)
+
+# df_clean <- cleaned_clinical_data_df %>%
+#   mutate(sites_of_involvement = case_when(
+#     str_detect(sites_of_involvement, regex("bone|liver|lung|brain|adrenal", ignore_case = TRUE)) ~ "Distant_Metastasis",
+#     str_detect(sites_of_involvement, "Left") & str_detect(sites_of_involvement, "Right") ~ "Bilateral",
+#     str_detect(sites_of_involvement, "Upper") & str_detect(sites_of_involvement, "Lower") ~ "Overlapping",
+#     str_detect(sites_of_involvement, "Inner") & str_detect(sites_of_involvement, "Outer") ~ "Overlapping",
+#     str_detect(sites_of_involvement, regex("upper inner", ignore_case = TRUE)) ~ "Upper_Inner",
+#     str_detect(sites_of_involvement, regex("upper outer", ignore_case = TRUE)) ~ "Upper_Outer",
+#     str_detect(sites_of_involvement, regex("lower inner", ignore_case = TRUE)) ~ "Lower_Inner",
+#     str_detect(sites_of_involvement, regex("lower outer", ignore_case = TRUE)) ~ "Lower_Outer",
+#     str_detect(sites_of_involvement, regex("nipple", ignore_case = TRUE)) ~ "Nipple",
+#     TRUE ~ "NOS_Other"
+#   )) %>%
+#   mutate(sites_of_involvement = as.factor(sites_of_involvement))
+
+
+# cleaned_clinical_data_df <- df_clean
+
+# # Vérification
+# print(table(df_clean$sites_of_involvement))
+```
+
+```{r}
+# Assurez-vous d'avoir bien chargé library(dplyr) ou library(tidyverse)
+
+# 1. Aplatir la colonne de listes en un seul vecteur
+# 'unlist' transforme la liste de listes en une longue liste d'éléments
+sites_vector <- unlist(clinical_data$sites_of_involvement)
+
+# 2. Convertir en un dataframe/tibble pour le comptage et le pourcentage
+if (!is.null(sites_vector)) {
+  
+  # Créer un tibble à partir du vecteur aplati
+  sites_df <- tibble(site = sites_vector)
+  
+  # Calculer le nombre total de mentions (qui peut être supérieur au nombre de patients)
+  total_mentions <- nrow(sites_df)
+  
+  # 3. Calculer la table de fréquence et le pourcentage
+  frequency_table_sites <- sites_df %>%
+    # Compter les occurrences de chaque site unique
+    count(site, name = "Nombre_Occurrences") %>%
+    # Calculer le pourcentage
+    mutate(
+      Pourcentage = round((Nombre_Occurrences / total_mentions) * 100, 2)
+    ) %>%
+    # Trier par fréquence décroissante
+    arrange(desc(Nombre_Occurrences))
+  
+  # 4. Afficher le tableau de fréquence
+  print(frequency_table_sites)
+  
+} else {
+  print("La colonne sites_of_involvement est vide ou contient seulement des valeurs NULL/NA.")
+}
+```
+
+```{r}
+#sites_of_involvement on a bien encodée
+# --- Nouveau Traitement pour sites_of_involvement : Regroupement Binaire ---
+temp <- cleaned_clinical_data_df
+# 1. Aplatissement en texte (comme dans le script initial)
+temp$sites_temp <- sapply(cleaned_clinical_data_df$sites_of_involvement, function(x) {
+    if(is.null(x) || length(x) == 0 || all(is.na(x))) return(NA) 
+    return(paste(x, collapse = " "))
+})
+
+# 2. Création de la variable binaire : Tumeur primaire DANS le sein (0) ou AILLEURS (1)
+# Si la chaîne contient le mot "Breast", on considère que c'est une tumeur primaire du sein (0)
+# Sinon, on considère que c'est un "Autre Site" (Bone, Liver, etc.) (1)
+temp$site_is_other <- ifelse(
+    grepl("Breast", temp$sites_temp, ignore.case = TRUE), 
+    0, 
+    1
+)
+
+# 3. Nettoyage
+temp$sites_of_involvement <- NULL
+temp$sites_temp <- NULL
+
+# Vérification rapide de la distribution après le nouveau regroupement
+print(table(temp$site_is_other))
+cleaned_clinical_data_df<- temp
+```
+
+# Enregistrement des dataset pour aller plus vite
+```{r}
+# Sauvegarder
+save(cleaned_clinical_data_df, file = "../data/processed/cleaned_clinical_data_df.RData")
+save(df_clinical_data_brut, file = "../data/processed/df_clinical_data_brut.RData")
+save(GeneX, file = "../data/processed/GeneX.RData")
+save(GeneX_pca, file = "../data/processed/GeneX_pca.RData")
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
